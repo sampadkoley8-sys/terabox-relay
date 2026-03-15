@@ -10,6 +10,13 @@ import threading
 import requests
 from flask import Flask, request, jsonify
 
+# curl_cffi impersonates real browser TLS fingerprint to bypass CF
+try:
+    from curl_cffi.requests import Session as CurlSession
+    HAS_CURL = True
+except ImportError:
+    HAS_CURL = False
+
 app = Flask(__name__)
 
 # Free cookies from tera.backend.live
@@ -108,32 +115,47 @@ def resolve():
     elif "terabox.com" in url and "1024" not in url:
         share_urls.append(url.replace("terabox.com", "teraboxapp.com"))
 
+    # Helper: try POST with both curl_cffi (browser TLS) and requests
+    def _try_post(api_url, payload, hdrs):
+        """Try curl_cffi first (bypasses CF), fallback to requests."""
+        if HAS_CURL:
+            try:
+                s = CurlSession(impersonate="chrome120")
+                r = s.post(api_url, json=payload, headers=hdrs, timeout=20, verify=False)
+                return r
+            except Exception:
+                pass
+        try:
+            return requests.post(api_url, json=payload, headers=hdrs, timeout=20, verify=False)
+        except Exception:
+            return None
+
     # Try each API site
     for api_url in API_SITES:
         origin = api_url.rsplit("/api", 1)[0]
         for share_url in share_urls:
             try:
-                r = requests.post(
-                    api_url,
-                    json={"url": share_url},
-                    headers={
-                        "Content-Type": "application/json",
-                        "Origin": origin,
-                        "Referer": origin + "/",
-                        "User-Agent": BROWSER_UA,
-                        "Accept": "application/json, text/plain, */*",
-                    },
-                    timeout=20,
-                )
+                hdrs = {
+                    "Content-Type": "application/json",
+                    "Origin": origin,
+                    "Referer": origin + "/",
+                    "User-Agent": BROWSER_UA,
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+                r = _try_post(api_url, {"url": share_url}, hdrs)
+                if not r:
+                    break
                 if r.status_code == 403 and "text/html" in r.headers.get("content-type", ""):
-                    break  # CF block, skip this site
+                    print(f"[RELAY] {origin}: CF-blocked")
+                    break
                 if r.status_code != 200:
                     break
 
                 data = r.json()
                 errno = data.get("errno", -1)
                 if errno != 0:
-                    continue  # Try next share URL
+                    continue
 
                 file_list = data.get("list", [])
                 results = []
@@ -153,16 +175,16 @@ def resolve():
                         })
 
                 if results:
+                    src = origin.replace("https://", "")
+                    print(f"[RELAY] OK: {len(results)} files via {src}")
                     return jsonify({
                         "status": "ok",
-                        "source": origin.replace("https://", ""),
+                        "source": src,
                         "files": results,
                     })
 
-            except requests.exceptions.ConnectionError:
-                break  # DNS fail, skip site
             except Exception:
-                continue
+                break
 
     return jsonify({"status": "error", "message": "All APIs failed"}), 502
 
