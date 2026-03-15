@@ -191,6 +191,31 @@ def _cookie_refresher():
 
 threading.Thread(target=_cookie_refresher, daemon=True).start()
 
+
+# ============================================================
+# SELF-PING — keeps Render free tier alive 24/7
+# Pings itself every 10 seconds so Render never spins down
+# ============================================================
+def _self_ping():
+    """Ping own /health endpoint every 10 seconds to prevent Render free tier spin-down."""
+    ping_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not ping_url:
+        print("[RELAY] RENDER_EXTERNAL_URL not set — self-ping disabled (set it in Render env vars)")
+        print("[RELAY] Format: https://terabox-relay-xxxx.onrender.com")
+        return
+    ping_url += "/health"
+    print(f"[RELAY] Self-ping active: {ping_url} every 10s")
+    _sess = requests.Session()
+    while True:
+        try:
+            _sess.get(ping_url, timeout=10)
+        except Exception:
+            pass
+        time.sleep(10)
+
+threading.Thread(target=_self_ping, daemon=True).start()
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
